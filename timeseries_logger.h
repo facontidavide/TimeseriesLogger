@@ -13,26 +13,25 @@ namespace tsl{
 
 class TimeseriesLoggerRoot;
 
+class LoggerNode;
+
 class LoggerNode
 {
 public:
     const std::string& name() const { return _name; }
 
-    const std::vector<uint16_t>& childrenIndexes() const { return _children_index; }
+    const std::vector<LoggerNode*>& children() const { return _children; }
 
-    LoggerNode* getRoot();
-    virtual ~LoggerNode(){
+    TimeseriesLoggerRoot* getRoot() { return _root; }
 
-    }
+    virtual ~LoggerNode(){ }
 
 protected:
-    LoggerNode(LoggerNode* _parent, const char* name, uint16_t index, uint32_t offset):
-        _name(name), _parent(_parent), _index(index), _offset(offset)
-    {}
+    LoggerNode(LoggerNode* parent, TimeseriesLoggerRoot *root, const char* name, uint32_t offset);
     const std::string _name;
-    std::vector< uint16_t > _children_index;
-    uint16_t    _index;
+    std::vector<LoggerNode*> _children;
     LoggerNode* _parent;
+    TimeseriesLoggerRoot* _root;
     uint32_t _offset;
 
     friend class TimeseriesLoggerRoot;
@@ -45,27 +44,17 @@ template <typename T>class NumericValue: public LoggerNode
 public:
     virtual ~NumericValue(){}
 
-    NumericValue& operator =( T val)
-    {
-        *reinterpret_cast<double*>( _root_buffer.data() + _offset ) = val;
-    }
+    NumericValue& operator =( T val);
 
-    virtual void set(T val) {
-        *reinterpret_cast<double*>( _root_buffer.data() + _offset ) = val;
-    }
+    virtual void set(T val);
 
-    T get() const {
-        return *reinterpret_cast<double*>( _root_buffer.data() + _offset );
-    }
-
-    const char* getName();
+    T get() const;
 
     template <typename OtherType> std::shared_ptr<NumericValue<OtherType>> createChild(const char* name);
 
 protected:
 
-    NumericValue(LoggerNode* parent, const char* name, uint16_t index, uint32_t offset, std::vector<uint8_t> &raw_buffer);
-    std::vector<uint8_t>& _root_buffer;
+    NumericValue(LoggerNode* parent, TimeseriesLoggerRoot* root, const char* name, uint32_t offset);
     friend class TimeseriesLoggerRoot;
 };
 //----------------------------------------------
@@ -82,12 +71,17 @@ public:
 
     template <typename T> std::shared_ptr<NumericValue<T>> createChild(LoggerNode* parent, const char* name);
 
-    LoggerNode* getNode(int16_t index);
+    std::shared_ptr<LoggerNode>& getNode(int16_t index) { return _nodes[index]; }
+    const std::shared_ptr<LoggerNode>& getNode(int16_t index) const { return _nodes[index]; }
+
     int16_t nodesCount() const { return _nodes.size(); }
+
+    std::vector<uint8_t>& rawBuffer()             { return _raw_buffer; }
+    const std::vector<uint8_t>& rawBuffer() const { return _raw_buffer; }
 
 protected:
     std::vector<uint8_t> _raw_buffer;
-    std::vector<LoggerNode*> _nodes;
+    std::vector< std::shared_ptr<LoggerNode>> _nodes;
 
 };
 
@@ -96,38 +90,54 @@ protected:
 //----------------------------------------------
 
 
-inline LoggerNode *LoggerNode::getRoot() {
-    LoggerNode* rt = this;
-    while(rt->_parent != nullptr ) rt = rt->_parent;
-    return rt;
-}
-
 template <typename Type> inline
 std::shared_ptr<NumericValue<Type>> TimeseriesLoggerRoot::createChild(LoggerNode* parent, const char* name)
 {
     TimeseriesLoggerRoot* root = this;
-    uint16_t last_index = root->_index;
-    for(auto& index: parent->_children_index)
+
+    for(auto& child: parent->_children)
     {
-        if( strcmp( _nodes[index]->name().c_str(),name ) == 0)
+        if( strcmp( child->name().c_str(), name ) == 0)
         {
             throw std::runtime_error("Child node exists already");
         }
     }
 
-    parent->_children_index.push_back(last_index);
-    auto offset = root->_offset;
+    auto ptr = ( new NumericValue<Type>( parent, root, name, root->_offset ) );
+    std::shared_ptr<NumericValue<Type>> shr_ptr( ptr );
+
+    // move the root offset;
     root->_offset += sizeof(Type);
-    auto ptr= ( new NumericValue<Type>( parent, name, last_index, offset, root->_raw_buffer ) );
-    _nodes.push_back( ptr );
-    root->_index++;
-    return std::shared_ptr<NumericValue<Type>>(ptr);
+    root->_raw_buffer.resize( root->_offset );
+
+    //self register
+    root->_nodes.push_back( shr_ptr );
+    parent->_children.push_back(ptr);
+
+    return shr_ptr;
 }
 
 template<typename T> inline
-NumericValue<T>::NumericValue(tsl::LoggerNode *parent, const char *name, uint16_t index, uint32_t offset, std::vector<uint8_t> &raw_buffer):
-    LoggerNode(parent,name,index, offset),
-    _root_buffer(raw_buffer)
+NumericValue<T> &NumericValue<T>::operator =(T val)
+{
+    *reinterpret_cast<T*>( _root->rawBuffer().data() + _offset ) = val;
+}
+
+template<typename T> inline
+void NumericValue<T>::set(T val) {
+    *reinterpret_cast<T*>( _root->rawBuffer().data() + _offset ) = val;
+}
+
+template<typename T> inline
+T NumericValue<T>::get() const {
+    return *reinterpret_cast<T*>( _root->rawBuffer().data() + _offset );
+}
+
+
+
+template<typename T> inline
+NumericValue<T>::NumericValue(tsl::LoggerNode *parent, TimeseriesLoggerRoot *root, const char *name, uint32_t offset):
+    LoggerNode(parent, root, name, offset)
 {
 
 }

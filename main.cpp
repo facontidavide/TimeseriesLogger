@@ -12,23 +12,38 @@ TEST_CASE( "Build tree", "TimeSeriesLogger" )
     TimeseriesLoggerRoot logger;
     REQUIRE( logger.nodesCount() == 0);
 
-    auto first = logger.createChild<double>("first");
+    auto first = logger.createChild<uint16_t>("first");
     REQUIRE( logger.nodesCount() == 1);
+    REQUIRE( logger.rawBuffer().size() == 2);
 
-    auto second = logger.createChild<int>("second");
+    auto second = logger.createChild<int16_t>("second");
     REQUIRE( logger.nodesCount() == 2);
+    REQUIRE( logger.rawBuffer().size() == 4);
 
     // it is not allowed to add children with the same name
     REQUIRE_THROWS( logger.createChild<int>("second") );
     REQUIRE( logger.nodesCount() == 2);
+    REQUIRE( logger.rawBuffer().size() == 4);
 
-    auto A = first->createChild<float>("A");
-    auto B = first->createChild<float>("B");
-    auto C = first->createChild<float>("C");
+    auto A = first->createChild<int32_t>("A");
+    auto B = first->createChild<int32_t>("B");
+    auto C = first->createChild<int32_t>("C");
 
     REQUIRE( logger.nodesCount() == 5);
-    REQUIRE( logger.childrenIndexes().size() == 2);
-    REQUIRE( first->childrenIndexes().size()  == 3);
-    REQUIRE( second->childrenIndexes().size() == 0);
+    REQUIRE( logger.children().size() == 2);
+    REQUIRE( first->children().size()  == 3);
+    REQUIRE( second->children().size() == 0);
+    REQUIRE( logger.rawBuffer().size() == 16);
 
+    first->set(0x1111);
+    second->set(0x2222);
+    A->set(0x33334444);
+    B->set(0x55556666);
+    C->set(0x77778888);
+
+    REQUIRE( first->get() == (0x1111));
+    REQUIRE( second->get() ==(0x2222));
+    REQUIRE( A->get() == (0x33334444));
+    REQUIRE( B->get() == (0x55556666));
+    REQUIRE( C->get() == (0x77778888));
 }
