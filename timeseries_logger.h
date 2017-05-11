@@ -8,80 +8,119 @@
 #include <memory>
 #include <string>
 #include <cstring>
+#include <type_traits>
+#include <boost/type_traits.hpp>
 
-namespace tsl{
+#define IS_TRIVIALLY_COPYABLE(T) (boost::has_trivial_copy<T>::value && boost::has_trivial_destructor<T>::value)
 
-class TimeseriesLoggerRoot;
 
-class LoggerNode;
+namespace TimeSeriesLogger{
 
-class LoggerNode
+class Node;
+template <typename T> class PodNode;
+class TreeRoot;
+
+struct NodeInfo
 {
-public:
-    const std::string& name() const { return _name; }
-
-    const std::vector<LoggerNode*>& children() const { return _children; }
-
-    TimeseriesLoggerRoot* getRoot() { return _root; }
-
-    virtual ~LoggerNode(){ }
-
-protected:
-    LoggerNode(LoggerNode* parent, TimeseriesLoggerRoot *root, const char* name, uint32_t offset);
-    const std::string _name;
-    std::vector<LoggerNode*> _children;
-    LoggerNode* _parent;
-    TimeseriesLoggerRoot* _root;
-    uint32_t _offset;
-
-    friend class TimeseriesLoggerRoot;
+    NodeInfo( const char* name, Node* parent): _name(name), _parent(parent) {}
+    const std::string  _name;
+    std::vector<Node*> _children;
+    Node* _parent;
 };
 
 //----------------------------------------------
 
-template <typename T>class NumericValue: public LoggerNode
+class Node
 {
 public:
-    virtual ~NumericValue(){}
+    const std::string& name() const { return _info->_name; }
 
-    NumericValue& operator =( T val);
+    const std::vector<Node*>& children() const { return _info->_children; }
 
-    virtual void set(T val);
+    const TreeRoot& root() const { return _root; }
+
+    virtual ~Node(){ }
+
+   // template <typename T> PodNode<T>* addChild(const char* name);
+
+protected:
+
+    Node(Node* parent, TreeRoot& root, const char* name, size_t offset);
+
+    TreeRoot& _root;
+    std::shared_ptr<NodeInfo> _info;
+    size_t  _offset;
+
+    friend class TreeRoot;
+};
+
+
+//----------------------------------------------
+
+template <typename POD>
+struct Serialize
+{
+    static size_t size()
+    {
+        static_assert( IS_TRIVIALLY_COPYABLE(POD), "Non trivially Copyable" );
+        return sizeof(POD);
+    }
+    static void serialize( const POD& source, uint8_t* destination )
+    {
+        static_assert( IS_TRIVIALLY_COPYABLE(POD), "Non trivially Copyable" );
+        std::memcpy( destination, &source, size() );
+    }
+    static size_t deserialize( const uint8_t* source, POD& destination )
+    {
+        static_assert( IS_TRIVIALLY_COPYABLE(POD), "Non trivially Copyable" );
+        std::memcpy( &destination, source, size()  );
+        return size();
+    }
+};
+
+
+
+template <typename T>
+class PodNode: public Node
+{
+public:
+    virtual ~PodNode(){}
+
+    PodNode& operator =(const T& val);
+
+    PodNode& operator *();
+
+    const PodNode& operator *() const;
+
+    virtual void set(const T& val);
 
     T get() const;
 
-    template <typename OtherType> std::shared_ptr<NumericValue<OtherType>> createChild(const char* name);
-
 protected:
 
-    NumericValue(LoggerNode* parent, TimeseriesLoggerRoot* root, const char* name, uint32_t offset);
-    friend class TimeseriesLoggerRoot;
+    PodNode(Node* parent, TreeRoot& root, const char* name, size_t offset);
+    friend class TreeRoot;
 };
 //----------------------------------------------
-class TimeseriesLoggerRoot: public LoggerNode
+class TreeRoot: public Node
 {
 public:
-    TimeseriesLoggerRoot();
+    TreeRoot();
+    ~TreeRoot(){}
 
-    ~TimeseriesLoggerRoot(){}
+    const std::vector<Node*>& allNodes() const     { return _nodes; }
 
-    template <typename T> std::shared_ptr<NumericValue<T>> createChild(const char* name) {
-        return createChild<T>(this, name);
-    }
-
-    template <typename T> std::shared_ptr<NumericValue<T>> createChild(LoggerNode* parent, const char* name);
-
-    std::shared_ptr<LoggerNode>& getNode(int16_t index) { return _nodes[index]; }
-    const std::shared_ptr<LoggerNode>& getNode(int16_t index) const { return _nodes[index]; }
-
-    int16_t nodesCount() const { return _nodes.size(); }
-
-    std::vector<uint8_t>& rawBuffer()             { return _raw_buffer; }
+    std::vector<uint8_t>&       rawBuffer()       { return _raw_buffer; }
     const std::vector<uint8_t>& rawBuffer() const { return _raw_buffer; }
 
+    template <typename T>
+    PodNode<T>* addChild(const char* name, Node* parent = nullptr);
+
 protected:
+
     std::vector<uint8_t> _raw_buffer;
-    std::vector< std::shared_ptr<LoggerNode>> _nodes;
+    std::vector<Node*>   _nodes;
+    size_t _cursor;
 
 };
 
@@ -90,12 +129,10 @@ protected:
 //----------------------------------------------
 
 
-template <typename Type> inline
-std::shared_ptr<NumericValue<Type>> TimeseriesLoggerRoot::createChild(LoggerNode* parent, const char* name)
+template <typename T> inline
+PodNode<T>* TreeRoot::addChild(const char* name, Node* parent)
 {
-    TimeseriesLoggerRoot* root = this;
-
-    for(auto& child: parent->_children)
+    for(auto& child: parent->children() )
     {
         if( strcmp( child->name().c_str(), name ) == 0)
         {
@@ -103,51 +140,67 @@ std::shared_ptr<NumericValue<Type>> TimeseriesLoggerRoot::createChild(LoggerNode
         }
     }
 
-    auto ptr = ( new NumericValue<Type>( parent, root, name, root->_offset ) );
-    std::shared_ptr<NumericValue<Type>> shr_ptr( ptr );
+    _raw_buffer.resize(  _cursor + Serialize<T>::size() );
+
+    PodNode<T>* ptr = new PodNode<T>( parent, *this, name, _cursor );
 
     // move the root offset;
-    root->_offset += sizeof(Type);
-    root->_raw_buffer.resize( root->_offset );
+    _cursor += Serialize<T>::size();
 
     //self register
-    root->_nodes.push_back( shr_ptr );
-    parent->_children.push_back(ptr);
+    _nodes.push_back( ptr );
+    parent->_info->_children.push_back(ptr);
 
-    return shr_ptr;
+    return ptr;
 }
 
+//template <typename T> inline
+//PodNode<T>* Node::addChild(const char* name)
+//{
+//    return _root.addChild<T>(name);
+//}
+
+
 template<typename T> inline
-NumericValue<T> &NumericValue<T>::operator =(T val)
+PodNode<T> &PodNode<T>::operator =(const T& val)
 {
-    *reinterpret_cast<T*>( _root->rawBuffer().data() + _offset ) = val;
+    Serialize<T>::serialize(val, _root.rawBuffer().data() + _offset );
 }
 
 template<typename T> inline
-void NumericValue<T>::set(T val) {
-    *reinterpret_cast<T*>( _root->rawBuffer().data() + _offset ) = val;
+void PodNode<T>::set(const T &val)
+{
+    Serialize<T>::serialize(val, _root.rawBuffer().data() + _offset );
 }
 
 template<typename T> inline
-T NumericValue<T>::get() const {
-    return *reinterpret_cast<T*>( _root->rawBuffer().data() + _offset );
+T PodNode<T>::get() const
+{
+    T val;
+    Serialize<T>::deserialize(_root.rawBuffer().data() + _offset, val );
+    return val;
 }
 
-
+template<typename T> inline
+PodNode<T>& PodNode<T>::operator *()
+{
+    return *reinterpret_cast<T*>( _root.rawBuffer().data() + _offset );
+}
 
 template<typename T> inline
-NumericValue<T>::NumericValue(tsl::LoggerNode *parent, TimeseriesLoggerRoot *root, const char *name, uint32_t offset):
-    LoggerNode(parent, root, name, offset)
+const PodNode<T>& PodNode<T>::operator *() const
+{
+    return *reinterpret_cast<T*>( _root.rawBuffer().data() + _offset );
+}
+
+template<typename T> inline
+PodNode<T>::PodNode(TimeSeriesLogger::Node *parent, TreeRoot &root,
+                    const char *name, size_t offset):
+    Node(parent, root, name, offset)
 {
 
 }
 
-template<typename T> template <typename OtherType> inline
-std::shared_ptr<NumericValue<OtherType> > NumericValue<T>::createChild(const char* name)
-{
-    TimeseriesLoggerRoot* root = static_cast<TimeseriesLoggerRoot*>(getRoot());
-    return root->createChild<OtherType>(this,name);
-}
 
 
 } // end namespace
